@@ -1,0 +1,58 @@
+original=RAW_PAIRED\/lane1-s001-index-ATCACG-ITSP4_S1_R1_001.pear.fastq.assembled.fastq #PAIRED FASTQ
+barcodedir=barcodes_ITSP4 #directory holding barcode files, with one PCR rep per file
+outdir=LIB_ITSP4 #directory to save outputs
+
+
+raw="$(basename ${original} | sed 's/_R2_001.fastq.pear.fastq.assembled.fastq//')"
+origdir="$(dirname ${original})"
+
+
+# first, demultiplex the plate by sample based on the paired reads fastq
+ls -1 "${barcodedir}" | sed 's/^/demultpear.sh "$barcode_dir"\//g' | sed 's/$/"${original}" pear/g' > demultpear.txt
+SGE_Array -c demultpear.txt -q chinook -r demultpear_log
+
+
+# grab read IDs for each demultiplexed sample
+# prefix not always @M, check raw reads!
+for f in `ls -1 "${outdir}"`; do
+        echo "grep '@M' "${outdir}"/$f > "${outdir}"/$f.ids"
+done > grepids.txt
+
+SGE_Array -c grepids.txt -q chinook -r grepids_log
+
+# now we can remove the demultiplexed files from the paired end fastq
+rm "${outdir}"/*pear.fastq -f
+
+
+# now let's extract all of the pair-able reads on a per sample basis - need to add FW and REV original files to demultpears.sh
+ls -1 "${outdir}" | sed 's/^/demultorig.sh /g' > demultorig.txt
+SGE_Array -c alldemultorig.txt -q chinook -r demultorig_log
+
+
+# grab unassembled read ids from PEAR output
+grep '@M' "${origdir}"/"${raw}"_R2_001.fastq.pear.fastq.unassembled.forward.fastq > ${raw}.unassembled.forward.ids
+grep '@M' "${origdir}"/"${raw}"_R2_001.fastq.pear.fastq.unassembled.reverse.fastq > ${raw}.unassembled.reverse.ids
+
+# double check that these are equivalent...
+paste "${raw}".unassembled.forward.ids "${raw}".unassembled.reverse.ids | sed 's/2:N:0:CGATGT/1:N:0:CGATGT/g' | awk '{if($1!=$3) print $0}'
+
+# grab unassembled reads from raw files
+SGE_Batch -c "grep -f ${raw}.unassembled.forward.ids ${raw}_R1_001.fastq -A3 --no-group-separator > ${raw}_R1_001.unassembled.fastq" -q chinook -r grepunassembled1_log
+SGE_Batch -c "grep -f ${raw}.unassembled.reverse.ids ${raw}_R2_001.fastq -A3 --no-group-separator > ${raw}_R2_001.unassembled.fastq" -q chinook -r grepunassembled2_log
+
+# delete all ID files...
+rm "${outdir}"/*ids -f
+
+# convert original fastq files to tables & merge
+seqkit fx2tab "${raw}"_R1_001.unassembled.fastq > ${raw}.tsv
+seqkit fx2tab "${raw}"_R2_001.unassembled.fastq > ${raw}2.tsv
+join -j 1 -o 1.1,1.2,1.3,2.3,1.5,2.5 <(sort -k1 ${raw}.tsv) <(sort -k1 ${raw}2.tsv) > ${raw}.assembled.tsv
+
+# handle unassembled (long) reads per sample (merge into existing files)
+ls -1 "${barcodedir}" | sed 's/^/dealwithlongreads.sh "${raw}" "${outdir}" "${barcodedir}"\//g' > runlongreads.txt
+SGE_Array -c runlongreads.txt -q chinook -r runlongreads_log
+
+# final clean up
+rm "${raw}"*unassembled.tsv -f
+rm "${raw}"*unassembled.fastq -f
+
